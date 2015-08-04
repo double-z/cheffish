@@ -3,6 +3,7 @@ require 'net/ssh'
 require 'etc'
 require 'socket'
 require 'digest/md5'
+require 'base64'
 
 module Cheffish
   class KeyFormatter
@@ -23,7 +24,7 @@ module Cheffish
       end
 
       key_format[:type] = type_of(key)
-      key_format[:size] = size_of(key)
+      key_format[:size] = size_of(key) if size_of(key)
       key_format[:pass_phrase] = pass_phrase if pass_phrase
       # TODO cipher, exponent
 
@@ -44,9 +45,24 @@ module Cheffish
         end
       when :der
         key.to_der
-      when :fingerprint
+      when :fingerprint, :pkcs1md5fingerprint
         hexes = Digest::MD5.hexdigest(key.to_der)
         # Put : between every pair of hexes
+        hexes.scan(/../).join(':')
+      when :rfc4716md5fingerprint
+        type, base64_data, etc = encode_openssh_key(key).split
+        data = Base64.decode64(base64_data)
+        hexes = Digest::MD5.hexdigest(data)
+        hexes.scan(/../).join(':')
+      when :pkcs8sha1fingerprint
+        if RUBY_VERSION.to_f >= 2.0
+          raise "PKCS8 SHA1 not supported in Ruby #{RUBY_VERSION}"
+        end
+        require 'openssl_pkcs8'
+        pkcs8_pem = key.to_pem_pkcs8
+        pkcs8_base64 = pkcs8_pem.split("\n").reject { |l| l =~ /^-----/ }
+        pkcs8_data = Base64.decode64(pkcs8_base64.join)
+        hexes = Digest::SHA1.hexdigest(pkcs8_data)
         hexes.scan(/../).join(':')
       else
         raise "Unrecognized key format #{format}"
@@ -86,8 +102,12 @@ module Cheffish
     end
 
     def self.size_of(key)
-      # TODO DSA -- this is RSA only
-      key.n.num_bytes * 8
+      case key.class
+      when OpenSSL::PKey::RSA
+        key.n.num_bytes * 8
+      else
+        nil
+      end
     end
   end
 end

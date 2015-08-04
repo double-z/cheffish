@@ -1,11 +1,11 @@
 require 'chef/config'
 require 'chef/run_list'
-require 'cheffish/cheffish_server_api'
+require 'chef/provider/lwrp_base'
 
 module Cheffish
   class ChefProviderBase < Chef::Provider::LWRPBase
     def rest
-      @rest ||= CheffishServerAPI.new(new_resource.chef_server)
+      @rest ||= Cheffish.chef_server_api(new_resource.chef_server)
     end
 
     def current_resource_exists?
@@ -13,7 +13,7 @@ module Cheffish
     end
 
     def not_found_resource
-      resource = resource_class.new(new_resource.name)
+      resource = resource_class.new(new_resource.name, run_context)
       resource.action :delete
       resource
     end
@@ -31,7 +31,7 @@ module Cheffish
         if new_resource.complete
           result = normalize(resource_to_json(new_resource))
         else
-          # If resource is incomplete, use current json to fill any holes
+          # If the resource is incomplete, we use the current json to fill any holes
           result = current_json.merge(resource_to_json(new_resource))
         end
         augment_new_json(result)
@@ -60,16 +60,21 @@ module Cheffish
       json = resource.raw_json || {}
       keys.each do |json_key, resource_key|
         value = resource.send(resource_key)
+        # This takes care of Chef ImmutableMash and ImmutableArray
+        value = value.to_hash if value.is_a?(Hash)
+        value = value.to_a if value.is_a?(Array)
         json[json_key] = value if value
       end
       json
     end
 
     def json_to_resource(json)
-      resource = resource_class.new(new_resource.name)
+      resource = resource_class.new(new_resource.name, run_context)
       keys.each do |json_key, resource_key|
-        resource.send(resource_key, json[json_key])
+        resource.send(resource_key, json.delete(json_key))
       end
+      # Set the leftover to raw_json
+      resource.raw_json json
       resource
     end
 
@@ -94,23 +99,23 @@ module Cheffish
             end
           else
             if print_values
-              result << "add #{name == '' ? new_key : "#{name}.#{new_key}"} = #{new_value.inspect}"
+              result << "  add #{name == '' ? new_key : "#{name}.#{new_key}"} = #{new_value.inspect}"
             else
-              result << "add #{name == '' ? new_key : "#{name}.#{new_key}"}"
+              result << "  add #{name == '' ? new_key : "#{name}.#{new_key}"}"
             end
           end
         end
         removed_keys.keys.each do |removed_key|
-          result << "remove #{name == '' ? removed_key : "#{name}.#{removed_key}"}"
+          result << "  remove #{name == '' ? removed_key : "#{name}.#{removed_key}"}"
         end
       else
         old_json = old_json.to_s if old_json.kind_of?(Symbol)
         new_json = new_json.to_s if new_json.kind_of?(Symbol)
         if old_json != new_json
           if print_values
-            result << "update #{name} from #{old_json.inspect} to #{new_json.inspect}"
+            result << "  update #{name} from #{old_json.inspect} to #{new_json.inspect}"
           else
-            result << "update #{name}"
+            result << "  update #{name}"
           end
         end
       end
@@ -129,7 +134,18 @@ module Cheffish
       modifiers.each do |path, value|
         path = [path] if !path.kind_of?(Array)
         path = path.map { |path_part| path_part.to_s }
-        parent = path[0..-2].inject(json) { |hash, path_part| hash ? hash[path_part] : nil }
+        parent = 0.upto(path.size-2).inject(json) do |hash, index|
+          if hash.nil?
+            nil
+          elsif !hash.is_a?(Hash)
+            raise "Attempt to set #{path} to #{value} when #{path[0..index-1]} is not a hash"
+          else
+            hash[path[index]]
+          end
+        end
+        if !parent.nil? && !parent.is_a?(Hash)
+          raise "Attempt to set #{path} to #{value} when #{path[0..-2]} is not a hash"
+        end
         existing_value = parent ? parent[path[-1]] : nil
 
         if value.is_a?(Proc)
@@ -137,16 +153,17 @@ module Cheffish
         end
         if value == :delete
           parent.delete(path[-1]) if parent
-          # TODO clean up parent chain if hash is completely emptied
         else
-          if !parent
-            # Create parent if necessary
-            parent = path[0..-2].inject(json) do |hash, path_part|
-              hash[path_part] = {} if !hash[path_part]
-              hash[path_part]
-            end
+          # Create parent if necessary, overwriting values
+          parent = path[0..-2].inject(json) do |hash, path_part|
+            hash[path_part] = {} if !hash[path_part]
+            hash[path_part]
           end
-          parent[path[-1]] = value
+          if path.size > 0
+            parent[path[-1]] = value
+          else
+            json = value
+          end
         end
       end
       json
@@ -213,10 +230,17 @@ module Cheffish
       def initialize(name, parent = nil)
         @name = name
         @parent = parent
+        @org = nil
       end
 
       attr_reader :name
       attr_reader :parent
+      attr_reader :org
     end
+  end
+
+  # We are not interested in Chef's cloning behavior here.
+  def load_prior_resource(*args)
+    Chef::Log.debug("Overloading #{resource_name}.load_prior_resource with NOOP")
   end
 end

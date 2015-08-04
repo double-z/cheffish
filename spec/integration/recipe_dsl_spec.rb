@@ -1,17 +1,15 @@
 require 'support/spec_support'
+require 'cheffish/rspec/chef_run_support'
 require 'chef/resource/chef_node'
 require 'chef/provider/chef_node'
 require 'tmpdir'
 
 describe 'Cheffish Recipe DSL' do
-  extend SpecSupport
+  extend Cheffish::RSpec::ChefRunSupport
 
   context 'when we include with_chef_local_server' do
     before :each do
       @tmp_repo = tmp_repo = Dir.mktmpdir('chef_repo')
-      run_recipe do
-        with_chef_local_server :chef_repo_path => tmp_repo
-      end
     end
 
     after :each do
@@ -19,11 +17,12 @@ describe 'Cheffish Recipe DSL' do
     end
 
     it 'chef_nodes get put into said server' do
-      run_recipe do
+      tmp_repo = @tmp_repo
+      expect_recipe {
+        with_chef_local_server :chef_repo_path => tmp_repo
         chef_node 'blah'
-      end
-      chef_run.should have_updated 'chef_node[blah]', :create
-      File.should exist("#{@tmp_repo}/nodes/blah.json")
+      }.to have_updated 'chef_node[blah]', :create
+      expect(File).to exist("#{@tmp_repo}/nodes/blah.json")
     end
   end
 end

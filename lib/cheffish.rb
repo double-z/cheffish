@@ -1,56 +1,112 @@
-require 'chef/run_list/run_list_item'
-require 'cheffish/inline_resource'
-
 module Cheffish
   NAME_REGEX = /^[.\-[:alnum:]_]+$/
 
-  @@enclosing_data_bag = nil
-  def self.enclosing_data_bag
-    @@enclosing_data_bag
-  end
-  def self.enclosing_data_bag=(name)
-    @@enclosing_data_bag = name
+  def self.inline_resource(provider, provider_action, *resources, &block)
+    BasicChefClient.inline_resource(provider, provider_action, *resources, &block)
   end
 
-  @@enclosing_environment = nil
-  def self.enclosing_environment
-    @@enclosing_environment
-  end
-  def self.enclosing_environment=(name)
-    @@enclosing_environment = name
-  end
-
-  @@enclosing_data_bag_item_encryption = nil
-  def self.enclosing_data_bag_item_encryption
-    @@enclosing_data_bag_item_encryption
-  end
-  def self.enclosing_data_bag_item_encryption=(options)
-    @@enclosing_data_bag_item_encryption = options
-  end
-
-  def self.inline_resource(provider, &block)
-    InlineResource.new(provider).instance_eval(&block)
-  end
-
-  @@enclosing_chef_server = nil
-  def self.enclosing_chef_server
-    @@enclosing_chef_server || {
-      :chef_server_url => Chef::Config[:chef_server_url],
+  def self.default_chef_server(config = profiled_config)
+    {
+      :chef_server_url => config[:chef_server_url],
       :options => {
-        :client_name => Chef::Config[:node_name],
-        :signing_key_filename => Chef::Config[:client_key]
+        :client_name => config[:node_name],
+        :signing_key_filename => config[:client_key]
       }
     }
   end
-  def self.enclosing_chef_server=(chef_server)
-    @@enclosing_chef_server = chef_server
+
+  def self.chef_server_api(chef_server = default_chef_server)
+    Cheffish::ServerAPI.new(chef_server[:chef_server_url], chef_server[:options] || {})
   end
 
-  def self.reset
-    @@enclosing_data_bag = nil
-    @@enclosing_environment = nil
-    @@enclosing_data_bag_item_encryption = nil
-    @@enclosing_chef_server = nil
+  def self.profiled_config(config = Chef::Config)
+    if config.profile && config.profiles && config.profiles[config.profile]
+      MergedConfig.new(config.profiles[config.profile], config)
+    else
+      config
+    end
+  end
+
+  def self.load_chef_config(chef_config = Chef::Config)
+    if ::Gem::Version.new(::Chef::VERSION) >= ::Gem::Version.new('12.0.0')
+      chef_config.config_file = ::Chef::Knife.chef_config_dir
+    else
+      chef_config.config_file = ::Chef::Knife.locate_config_file
+    end
+    config_fetcher = Chef::ConfigFetcher.new(chef_config.config_file, chef_config.config_file_jail)
+    if chef_config.config_file.nil?
+      Chef::Log.warn("No config file found or specified on command line, using command line options.")
+    elsif config_fetcher.config_missing?
+      Chef::Log.warn("Did not find config file: #{chef_config.config_file}, using command line options.")
+    else
+      config_content = config_fetcher.read_config
+      config_file_path = chef_config.config_file
+      begin
+        chef_config.from_string(config_content, config_file_path)
+      rescue Exception => error
+        Chef::Log.fatal("Configuration error #{error.class}: #{error.message}")
+        filtered_trace = error.backtrace.grep(/#{Regexp.escape(config_file_path)}/)
+        filtered_trace.each {|line| Chef::Log.fatal("  " + line )}
+        Chef::Application.fatal!("Aborting due to error in '#{config_file_path}'", 2)
+      end
+    end
+    Cheffish.profiled_config(chef_config)
+  end
+
+  def self.honor_local_mode(local_mode_default = true, &block)
+    if !Chef::Config.has_key?(:local_mode) && !local_mode_default.nil?
+      Chef::Config.local_mode = local_mode_default
+    end
+    if Chef::Config.local_mode && !Chef::Config.has_key?(:cookbook_path) && !Chef::Config.has_key?(:chef_repo_path)
+      Chef::Config.chef_repo_path = Chef::Config.find_chef_repo_path(Dir.pwd)
+    end
+    begin
+      require 'chef/local_mode'
+      Chef::LocalMode.with_server_connectivity(&block)
+
+    rescue LoadError
+      Chef::Application.setup_server_connectivity
+      if block_given?
+        begin
+          yield
+        ensure
+          Chef::Application.destroy_server_connectivity
+        end
+      end
+    end
+  end
+
+  def self.get_private_key(name, config = profiled_config)
+    key, key_path = get_private_key_with_path(name, config)
+    key
+  end
+
+  def self.get_private_key_with_path(name, config = profiled_config)
+    if config[:private_keys] && config[:private_keys][name]
+      named_key = config[:private_keys][name]
+      if named_key.is_a?(String)
+        Chef::Log.info("Got key #{name} from Chef::Config.private_keys.#{name}, which points at #{named_key}.  Reading key from there ...")
+        return [ IO.read(named_key), named_key]
+      else
+        Chef::Log.info("Got key #{name} raw from Chef::Config.private_keys.#{name}.")
+        return [ named_key.to_pem, nil ]
+      end
+    elsif config[:private_key_paths]
+      config[:private_key_paths].each do |private_key_path|
+        next unless File.exist?(private_key_path)
+        Dir.entries(private_key_path).sort.each do |key|
+          ext = File.extname(key)
+          if ext == '' || ext == '.pem'
+            key_name = key[0..-(ext.length+1)]
+            if key_name == name
+              Chef::Log.info("Reading key #{name} from file #{private_key_path}/#{key}")
+              return [ IO.read("#{private_key_path}/#{key}"), "#{private_key_path}/#{key}" ]
+            end
+          end
+        end
+      end
+    end
+    nil
   end
 
   NOT_PASSED=Object.new
@@ -60,10 +116,7 @@ module Cheffish
       attribute :name, :kind_of => String, :regex => Cheffish::NAME_REGEX, :name_attribute => true
       attribute :chef_environment, :kind_of => String, :regex => Cheffish::NAME_REGEX
       attribute :run_list, :kind_of => Array # We should let them specify it as a series of parameters too
-      attribute :default_attributes, :kind_of => Hash
-      attribute :normal_attributes, :kind_of => Hash
-      attribute :override_attributes, :kind_of => Hash
-      attribute :automatic_attributes, :kind_of => Hash
+      attribute :attributes, :kind_of => Hash
 
       # Specifies that this is a complete specification for the environment (i.e. attributes you don't specify will be
       # reset to their defaults)
@@ -72,82 +125,28 @@ module Cheffish
       attribute :raw_json, :kind_of => Hash
       attribute :chef_server, :kind_of => Hash
 
-      # default 'ip_address', '127.0.0.1'
-      # default [ 'pushy', 'port' ], '9000'
-      # default 'ip_addresses' do |existing_value|
+      # attribute 'ip_address', '127.0.0.1'
+      # attribute [ 'pushy', 'port' ], '9000'
+      # attribute 'ip_addresses' do |existing_value|
       #   (existing_value || []) + [ '127.0.0.1' ]
       # end
-      # default 'ip_address', :delete
-      attr_accessor :default_modifiers
-      def default(attribute_path, value=Cheffish.NOT_PASSED, &block)
-        @default_modifiers ||= []
-        if value != Cheffish.NOT_PASSED
-          @default_modifiers << [ attribute_path, value ]
-        elsif block
-          @default_modifiers << [ attribute_path, block ]
-        else
-          raise "default requires either a value or a block"
-        end
-      end
-
-      # normal 'ip_address', '127.0.0.1'
-      # normal [ 'pushy', 'port' ], '9000'
-      # normal 'ip_addresses' do |existing_value|
-      #   (existing_value || []) + [ '127.0.0.1' ]
-      # end
-      # normal 'ip_address', :delete
-      attr_accessor :normal_modifiers
-      def normal(attribute_path, value=NOT_PASSED, &block)
-        @normal_modifiers ||= []
+      # attribute 'ip_address', :delete
+      attr_accessor :attribute_modifiers
+      def attribute(attribute_path, value=NOT_PASSED, &block)
+        @attribute_modifiers ||= []
         if value != NOT_PASSED
-          @normal_modifiers << [ attribute_path, value ]
+          @attribute_modifiers << [ attribute_path, value ]
         elsif block
-          @normal_modifiers << [ attribute_path, block ]
+          @attribute_modifiers << [ attribute_path, block ]
         else
-          raise "normal requires either a value or a block"
-        end
-      end
-
-      # override 'ip_address', '127.0.0.1'
-      # override [ 'pushy', 'port' ], '9000'
-      # override 'ip_addresses' do |existing_value|
-      #   (existing_value || []) + [ '127.0.0.1' ]
-      # end
-      # override 'ip_address', :delete
-      attr_accessor :override_modifiers
-      def override(attribute_path, value=NOT_PASSED, &block)
-        @override_modifiers ||= []
-        if value != NOT_PASSED
-          @override_modifiers << [ attribute_path, value ]
-        elsif block
-          @override_modifiers << [ attribute_path, block ]
-        else
-          raise "override requires either a value or a block"
-        end
-      end
-
-      # automatic 'ip_address', '127.0.0.1'
-      # automatic [ 'pushy', 'port' ], '9000'
-      # automatic 'ip_addresses' do |existing_value|
-      #   (existing_value || []) + [ '127.0.0.1' ]
-      # end
-      # automatic 'ip_address', :delete
-      attr_accessor :automatic_modifiers
-      def automatic(attribute_path, value=NOT_PASSED, &block)
-        @automatic_modifiers ||= []
-        if value != NOT_PASSED
-          @automatic_modifiers << [ attribute_path, value ]
-        elsif block
-          @automatic_modifiers << [ attribute_path, block ]
-        else
-          raise "automatic requires either a value or a block"
+          raise "attribute requires either a value or a block"
         end
       end
 
       # Patchy tags
       # tag 'webserver', 'apache', 'myenvironment'
       def tag(*tags)
-        normal 'tags' do |existing_tags|
+        attribute 'tags' do |existing_tags|
           existing_tags ||= []
           tags.each do |tag|
             if !existing_tags.include?(tag.to_s)
@@ -158,7 +157,7 @@ module Cheffish
         end
       end
       def remove_tag(*tags)
-        normal 'tags' do |existing_tags|
+        attribute 'tags' do |existing_tags|
           if existing_tags
             tags.each do |tag|
               existing_tags.delete(tag.to_s)
@@ -172,16 +171,12 @@ module Cheffish
       # tags :a, :b, :c # removes all other tags
       def tags(*tags)
         if tags.size == 0
-          normal('tags')
+          attribute('tags')
         else
           tags = tags[0] if tags.size == 1 && tags[0].kind_of?(Array)
-          normal 'tags', tags.map { |tag| tag.to_s }
+          attribute 'tags', tags.map { |tag| tag.to_s }
         end
       end
-
-
-      alias :attributes :normal_attributes
-      alias :attribute :normal
 
       # Order matters--if two things here are in the wrong order, they will be flipped in the run list
       # recipe 'apache', 'mysql'
@@ -216,7 +211,7 @@ module Cheffish
           raise ArgumentError, "At least one role must be specified"
         end
         @run_list_removers ||= []
-        @run_list_removers += roles.map { |recipe| Chef::RunList::RunListItem.new("role[#{role}]") }
+        @run_list_removers += roles.map { |role| Chef::RunList::RunListItem.new("role[#{role}]") }
       end
     end
   end
@@ -224,22 +219,11 @@ end
 
 # Include all recipe objects so require 'cheffish' brings in the whole recipe DSL
 
+require 'chef/run_list/run_list_item'
+require 'cheffish/basic_chef_client'
+require 'cheffish/server_api'
+require 'chef/knife'
+require 'chef/config_fetcher'
+require 'chef/log'
+require 'chef/application'
 require 'cheffish/recipe_dsl'
-require 'chef/resource/chef_client'
-require 'chef/resource/chef_data_bag'
-require 'chef/resource/chef_data_bag_item'
-require 'chef/resource/chef_environment'
-require 'chef/resource/chef_node'
-require 'chef/resource/chef_role'
-require 'chef/resource/chef_user'
-require 'chef/resource/private_key'
-require 'chef/resource/public_key'
-require 'chef/provider/chef_client'
-require 'chef/provider/chef_data_bag'
-require 'chef/provider/chef_data_bag_item'
-require 'chef/provider/chef_environment'
-require 'chef/provider/chef_node'
-require 'chef/provider/chef_role'
-require 'chef/provider/chef_user'
-require 'chef/provider/private_key'
-require 'chef/provider/public_key'

@@ -9,13 +9,14 @@ Gem::Specification.new do |s|
   s.summary = 'A library to manipulate Chef in Chef.'
   s.description = s.summary
   s.author = 'John Keiser'
-  s.email = 'jkeiser@opscode.com'
-  s.homepage = 'http://wiki.opscode.com/display/chef'
+  s.email = 'jkeiser@chef.io'
+  s.homepage = 'http://github.com/chef/cheffish'
 
-  s.add_dependency 'chef'
+  s.add_dependency 'chef-zero', '~> 4.2'
+  s.add_dependency 'chef' , '~> 12.1'
 
   s.add_development_dependency 'rake'
-  s.add_development_dependency 'rspec'
+  s.add_development_dependency 'rspec', '~> 3.0'
   s.bindir       = "bin"
   s.executables  = %w( )
 

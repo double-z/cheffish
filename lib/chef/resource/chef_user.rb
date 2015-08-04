@@ -10,11 +10,12 @@ class Chef::Resource::ChefUser < Chef::Resource::LWRPBase
   # Grab environment from with_environment
   def initialize(*args)
     super
-    chef_server Cheffish.enclosing_chef_server
+    chef_server run_context.cheffish.current_chef_server
   end
 
   # Client attributes
   attribute :name, :kind_of => String, :regex => Cheffish::NAME_REGEX, :name_attribute => true
+  attribute :display_name, :kind_of => String
   attribute :admin, :kind_of => [TrueClass, FalseClass]
   attribute :email, :kind_of => String
   attribute :external_authentication_uid

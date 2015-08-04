@@ -12,18 +12,18 @@ class Chef::Resource::ChefDataBagItem < Chef::Resource::LWRPBase
     super
     name @name
     if !data_bag
-      data_bag Cheffish.enclosing_data_bag
+      data_bag run_context.cheffish.current_data_bag
     end
-    if Cheffish.enclosing_data_bag_item_encryption
-      @encrypt = true if Cheffish.enclosing_data_bag_item_encryption[:encrypt_all]
-      @secret = Cheffish.enclosing_data_bag_item_encryption[:secret]
-      @secret_path = Cheffish.enclosing_data_bag_item_encryption[:secret_path] || Chef::Config[:encrypted_data_bag_secret]
-      @encryption_cipher = Cheffish.enclosing_data_bag_item_encryption[:encryption_cipher]
-      @encryption_version = Cheffish.enclosing_data_bag_item_encryption[:encryption_version]
-      @old_secret = Cheffish.enclosing_data_bag_item_encryption[:old_secret]
-      @old_secret_path = Cheffish.enclosing_data_bag_item_encryption[:old_secret_path]
+    if run_context.cheffish.current_data_bag_item_encryption
+      @encrypt = true if run_context.cheffish.current_data_bag_item_encryption[:encrypt_all]
+      @secret = run_context.cheffish.current_data_bag_item_encryption[:secret]
+      @secret_path = run_context.cheffish.current_data_bag_item_encryption[:secret_path] || run_context.config[:encrypted_data_bag_secret]
+      @encryption_cipher = run_context.cheffish.current_data_bag_item_encryption[:encryption_cipher]
+      @encryption_version = run_context.cheffish.current_data_bag_item_encryption[:encryption_version] || run_context.config[:data_bag_encrypt_version]
+      @old_secret = run_context.cheffish.current_data_bag_item_encryption[:old_secret]
+      @old_secret_path = run_context.cheffish.current_data_bag_item_encryption[:old_secret_path]
     end
-    chef_server Cheffish.enclosing_chef_server
+    chef_server run_context.cheffish.current_chef_server
   end
 
   def name(*args)
@@ -81,7 +81,7 @@ class Chef::Resource::ChefDataBagItem < Chef::Resource::LWRPBase
       @encrypt = true if @encrypt.nil?
     end
   end
-  attribute :encryption_version, :kind_of => Integer, :default => Chef::Config[:data_bag_encrypt_version]
+  attribute :encryption_version, :kind_of => Integer
 
   # Old secret (or secrets) to read the old data bag when we are changing keys and re-encrypting data
   attribute :old_secret, :kind_of => [String, Array]

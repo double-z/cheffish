@@ -3,7 +3,6 @@ require 'openssl'
 require 'cheffish/key_formatter'
 
 class Chef::Provider::PublicKey < Chef::Provider::LWRPBase
-
   action :create do
     if !new_source_key
       raise "No source key specified"
@@ -62,7 +61,7 @@ class Chef::Provider::PublicKey < Chef::Provider::LWRPBase
 
   def load_current_resource
     if ::File.exist?(new_resource.path)
-      resource = Chef::Resource::PublicKey.new(new_resource.path)
+      resource = Chef::Resource::PublicKey.new(new_resource.path, run_context)
       begin
         key, key_format = Cheffish::KeyFormatter.decode(IO.read(new_resource.path), nil, new_resource.path)
         if key
@@ -75,7 +74,7 @@ class Chef::Provider::PublicKey < Chef::Provider::LWRPBase
 
       @current_resource = resource
     else
-      not_found_resource = Chef::Resource::PublicKey.new(new_resource.path)
+      not_found_resource = Chef::Resource::PublicKey.new(new_resource.path, run_context)
       not_found_resource.action :delete
       @current_resource = not_found_resource
     end

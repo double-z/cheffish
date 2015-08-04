@@ -38,7 +38,7 @@ class Chef::Provider::ChefDataBagItem < Cheffish::ChefProviderBase
   def load_current_resource
     begin
       json = rest.get("data/#{new_resource.data_bag}/#{new_resource.id}")
-      resource = Chef::Resource::ChefDataBagItem.new(new_resource.name)
+      resource = Chef::Resource::ChefDataBagItem.new(new_resource.name, run_context)
       resource.raw_data json
       @current_resource = resource
     rescue Net::HTTPServerException => e
@@ -152,12 +152,12 @@ class Chef::Provider::ChefDataBagItem < Cheffish::ChefProviderBase
   end
 
   def encrypt(json, secret, version)
-    old_version = Chef::Config[:data_bag_encrypt_version]
-    Chef::Config[:data_bag_encrypt_version] = version
+    old_version = run_context.config[:data_bag_encrypt_version]
+    run_context.config[:data_bag_encrypt_version] = version
     begin
       Chef::EncryptedDataBagItem.encrypt_data_bag_item(json, secret)
     ensure
-      Chef::Config[:data_bag_encrypt_version] = old_version
+      run_context.config[:data_bag_encrypt_version] = old_version
     end
   end
 
@@ -170,7 +170,7 @@ class Chef::Provider::ChefDataBagItem < Cheffish::ChefProviderBase
         result = current_decrypted.merge(new_resource.raw_data || {})
       end
       result['id'] = new_resource.id
-      apply_modifiers(new_resource.raw_data_modifiers, result)
+      result = apply_modifiers(new_resource.raw_data_modifiers, result)
     end
   end
 
